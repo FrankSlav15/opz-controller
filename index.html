@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OP-Z Patch Controller</title>
+<style>
+  :root{--bg:#f4f4f2;--card:#fff;--ink:#1d1d1f;--mute:#8a8a8e;--line:#e2e2df;--acc:#ff5a1f;--ok:#1a9e55;--err:#d0312d;--warn:#b7791f;
+    --g:#2fb35a;--b:#2d7ff9;--y:#e8b90c;--r:#e5463b;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 22px;border-bottom:1px solid var(--line);background:var(--card)}
+  header h1{font-size:15px;margin:0;letter-spacing:.04em;font-weight:600}
+  header h1 span{color:var(--acc)}
+  .status{font-size:12px;color:var(--mute)} .status.ok{color:var(--ok)} .status.err{color:var(--err)}
+  main{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:18px;padding:18px 22px;max-width:1300px;margin:0 auto}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--mute);margin:0 0 10px;font-weight:600}
+  label.inl{font-size:12px;color:var(--mute);display:inline-flex;align-items:center;gap:6px}
+  select,input[type=number],textarea,button{font:inherit;color:inherit}
+  select,input[type=number]{border:1px solid var(--line);border-radius:6px;padding:5px 8px;background:#fff}
+  input[type=number]{width:80px}
+  button{border:1px solid var(--ink);background:var(--ink);color:#fff;border-radius:6px;padding:6px 12px;cursor:pointer}
+  button.ghost{background:#fff;color:var(--ink);border-color:var(--line)}
+  button:disabled{opacity:.4;cursor:default}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .tracks{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;margin-bottom:12px}
+  .tracks button{background:#fff;color:var(--ink);border:1px solid var(--line);padding:6px 2px;font-size:11px;text-transform:lowercase}
+  .tracks button small{display:block;color:var(--mute);font-size:9px}
+  .tracks button.on{background:var(--ink);color:#fff;border-color:var(--ink)} .tracks button.on small{color:#bbb}
+  .tracks button.touched:not(.on){border-color:var(--acc)}
+  .params{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px 18px}
+  .group{grid-column:1/-1;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--mute);margin-top:10px;display:flex;align-items:center;gap:6px}
+  .group i{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .p{display:grid;grid-template-columns:118px 1fr 30px;align-items:center;gap:8px;padding:3px 0}
+  .p .nm{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .p .nm code{font-size:10px;color:var(--mute);display:block;line-height:1.1}
+  .p .nm .inf{color:var(--warn);cursor:help}
+  .p .v{font:12px ui-monospace,Menlo,Consolas,monospace;text-align:right}
+  .p.unset .v{color:var(--mute)}
+  .p.unset input[type=range]{opacity:.45}
+  input[type=range]{width:100%;accent-color:var(--ink)}
+  textarea{width:100%;min-height:130px;border:1px solid var(--line);border-radius:8px;padding:10px;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;resize:vertical;background:#fbfbfa}
+  .msg{font-size:12px;margin-top:8px;white-space:pre-wrap}
+  .msg .e{color:var(--err)} .msg .w{color:var(--warn)} .msg .o{color:var(--ok)}
+  #log{height:220px;overflow:auto;font:11px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#fbfbfa;border:1px solid var(--line);border-radius:8px;padding:8px}
+  #log div{white-space:pre-wrap;word-break:break-word} #log .in{color:var(--b)} #log .sys{color:var(--mute)}
+  .note{font-size:11px;color:var(--mute);margin-top:8px}
+  .side{display:flex;flex-direction:column;gap:18px}
+  .empty{color:var(--mute);font-size:12px;padding:8px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>OP-Z <span>●</span> patch controller</h1>
+  <label class="inl">MIDI output <select id="outSel"><option value="">— none —</option></select></label>
+  <label class="inl"><input type="checkbox" id="syncIn" checked> follow OP-Z knobs (MIDI in)</label>
+  <button class="ghost" id="connectBtn">Connect MIDI</button>
+  <span class="status" id="status">not connected</span>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Track</h2>
+    <div class="tracks" id="tracks"></div>
+    <div class="row" style="margin-bottom:6px">
+      <label class="inl">MIDI channel for <b id="trkName">lead</b> <select id="chanSel"></select></label>
+      <button class="ghost" id="sendAllBtn" title="Re-send every known value of this track">Send track values</button>
+      <button class="ghost" id="resetTrkBtn" title="Forget this track's values in the page (sends nothing)">Forget values</button>
+    </div>
+    <div class="params" id="params"></div>
+    <div class="note">Grey slider = value not yet known to the page (nothing sent / received). <span style="color:var(--warn)">≈</span> = label inferred from the OP-Z dial chart; the CC number itself is from the official MIDI table.</div>
+  </section>
+
+  <div class="side">
+    <section class="card">
+      <h2>Patch code</h2>
+      <textarea id="patchIn" spellcheck="false" placeholder='{"track":"lead","params":{"filter":90,"resonance":40}}'></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="applyBtn">Apply</button>
+        <label class="inl">ramp <input type="number" id="rampMs" min="0" max="20000" step="50" value="0"> ms</label>
+        <span style="flex:1"></span>
+        <label class="inl"><input type="checkbox" id="exportAll"> all edited tracks</label>
+        <button class="ghost" id="copyBtn">Copy current settings</button>
+      </div>
+      <div class="msg" id="patchMsg"></div>
+    </section>
+
+    <section class="card">
+      <h2>Log</h2>
+      <div id="log"></div>
+      <div class="row" style="margin-top:8px"><button class="ghost" id="clearLog">Clear</button><span class="note" style="margin:0">Most recent at the bottom · max 300 lines</span></div>
+    </section>
+  </div>
+</main>
+
+<script>
+/* ===================== LOGIC (pure, DOM-free; tested under node) ===================== */
+var OPZ = (function(){
+  'use strict';
+  // Official OP-Z incoming MIDI table (teenage.engineering/guides/op-z/midi, §21.6)
+  var PARAMS = {
+    p1:         {cc:1,  max:127, name:'parameter 1'},
+    p2:         {cc:2,  max:127, name:'parameter 2'},
+    filter:     {cc:3,  max:127, name:'filter cutoff'},
+    resonance:  {cc:4,  max:127, name:'filter resonance'},
+    attack:     {cc:5,  max:127, name:'envelope attack'},
+    decay:      {cc:6,  max:127, name:'envelope decay'},
+    sustain:    {cc:7,  max:127, name:'envelope sustain'},
+    release:    {cc:8,  max:127, name:'envelope release'},
+    lfo_depth:  {cc:9,  max:127, name:'lfo depth'},
+    lfo_speed:  {cc:10, max:127, name:'lfo speed'},
+    lfo_target: {cc:11, max:127, name:'lfo target'},
+    lfo_shape:  {cc:12, max:127, name:'lfo shape'},
+    fx1:        {cc:13, max:127, name:'fx 1 send'},
+    fx2:        {cc:14, max:127, name:'fx 2 send'},
+    pan:        {cc:15, max:127, name:'pan'},
+    volume:     {cc:16, max:127, name:'volume'},
+    portamento: {cc:17, max:127, name:'portamento'},
+    note_style: {cc:18, max:127, name:'note style'},
+    gain:       {cc:50, max:127, name:'track gain'},
+    mute:       {cc:53, max:1,   name:'mute'}
+  };
+  var ALIASES = {
+    param1:'p1', parameter1:'p1', param2:'p2', parameter2:'p2',
+    cutoff:'filter', filter_cutoff:'filter', res:'resonance', reso:'resonance', q:'resonance',
+    a:'attack', d:'decay', s:'sustain', r:'release',
+    lfo_amount:'lfo_depth', lfo_rate:'lfo_speed', lfo_dest:'lfo_target', lfo_destination:'lfo_target',
+    fx1_send:'fx1', fx2_send:'fx2', send1:'fx1', send2:'fx2', level:'volume', vol:'volume',
+    glide:'portamento', porta:'portamento', track_gain:'gain'
+  };
+  // groups => [colour, [params]]
+  function L(o){ return o; }
+  var SET_DRUM  = L({p1:'pitch',p2:'reverse',filter:'filter',resonance:'resonance',attack:'attack',decay:'decay',sustain:'sustain',release:'release',
+                     lfo_depth:'lfo depth',lfo_speed:'lfo speed',lfo_target:'lfo target',lfo_shape:'lfo shape',fx1:'fx1 send',fx2:'fx2 send',pan:'pan',volume:'level',
+                     portamento:'portamento',note_style:'note style',gain:'track gain',mute:'mute'});
+  var SET_SYNTH = L({p1:'param 1 (engine)',p2:'param 2 (engine)',filter:'filter',resonance:'resonance',attack:'attack',decay:'decay',sustain:'sustain',release:'release',
+                     lfo_depth:'lfo depth',lfo_speed:'lfo speed',lfo_target:'lfo target',lfo_shape:'lfo shape',fx1:'fx1 send',fx2:'fx2 send',pan:'pan',volume:'level',
+                     portamento:'portamento',note_style:'note style',gain:'track gain',mute:'mute'});
+  var SET_ARP = {}; for (var k in SET_SYNTH) SET_ARP[k]=SET_SYNTH[k];
+  SET_ARP.lfo_depth='arp speed'; SET_ARP.lfo_speed='arp pattern'; SET_ARP.lfo_target='arp style'; SET_ARP.lfo_shape='arp range';
+  var SET_FX    = L({p1:'param 1 (effect)',p2:'param 2 (effect)',filter:'filter',resonance:'resonance',lfo_depth:'lfo depth',lfo_speed:'lfo speed',lfo_target:'lfo target',lfo_shape:'lfo shape',gain:'track gain',mute:'mute'});
+  var SET_TAPE  = L({p1:'tape speed',p2:'fine tune',filter:'filter',resonance:'resonance',fx1:'fx1 send',fx2:'fx2 send',pan:'pan',volume:'level',gain:'track gain',mute:'mute'});
+  var SET_MASTER= L({p1:'chorus',p2:'drive',filter:'filter (HP/LP, 64=neutral)',resonance:'resonance'});
+  var SET_LIGHTS= L({p1:'color',p2:'alt color',filter:'speed',resonance:'intensity',attack:'dial 5',decay:'dial 6',sustain:'dial 7',release:'dial 8'});
+  var SET_MOTION= {}; ['p1','p2','filter','resonance','attack','decay','sustain','release','lfo_depth','lfo_speed','lfo_target','lfo_shape','fx1','fx2','pan','volume']
+                     .forEach(function(p,i){ SET_MOTION[p]='control '+(i+1); });
+  // labels that are NOT just the official MIDI-table name (i.e. inferred from the dial chart)
+  var INFERRED = {
+    arp:['lfo_depth','lfo_speed','lfo_target','lfo_shape'],
+    tape:['p1','p2'], master:['p1','p2'],
+    lights:['p1','p2','filter','resonance','attack','decay','sustain','release'],
+    motion:Object.keys(SET_MOTION),
+    fx1:[], fx2:[]
+  };
+  var TRACKS = [
+    ['kick',SET_DRUM],['snare',SET_DRUM],['perc',SET_DRUM],['sample',SET_DRUM],
+    ['bass',SET_SYNTH],['lead',SET_SYNTH],['arp',SET_ARP],['chord',SET_SYNTH],
+    ['fx1',SET_FX],['fx2',SET_FX],['tape',SET_TAPE],['master',SET_MASTER],
+    ['perform',{}],['module',SET_SYNTH],['lights',SET_LIGHTS],['motion',SET_MOTION]
+  ].map(function(t,i){ return {name:t[0], index:i+1, defaultChannel:i+1, labels:t[1], inferred:INFERRED[t[0]]||[]}; });
+  var TRACK_BY = {}; TRACKS.forEach(function(t){ TRACK_BY[t.name]=t; });
+  var TRACK_ALIASES = {'1':'kick','2':'snare','3':'perc','4':'sample','5':'bass','6':'lead','7':'arp','8':'chord','9':'fx1','10':'fx2',
+    '11':'tape','12':'master','13':'perform','14':'module','15':'lights','16':'motion',
+    hats:'perc',hihat:'perc',drum:'kick','fx 1':'fx1','fx 2':'fx2',fxa:'fx1',fxb:'fx2',performance:'perform',io:'module','i/o':'module',visual:'motion'};
+
+  function normKey(s){ return String(s).trim().toLowerCase().replace(/[\s\-]+/g,'_'); }
+  function resolveTrack(name){
+    if (name===undefined||name===null) return null;
+    var k = String(name).trim().toLowerCase();
+    if (TRACK_BY[k]) return TRACK_BY[k];
+    if (TRACK_ALIASES[k]) return TRACK_BY[TRACK_ALIASES[k]];
+    k = k.replace(/[\s_\-]+/g,'');
+    if (TRACK_BY[k]) return TRACK_BY[k];
+    if (TRACK_ALIASES[k]) return TRACK_BY[TRACK_ALIASES[k]];
+    return null;
+  }
+  function resolveParam(name){
+    var k = normKey(name);
+    if (PARAMS[k]) return k;
+    if (ALIASES[k]) return ALIASES[k];
+    var k2 = k.replace(/_/g,'');
+    for (var p in PARAMS) if (p.replace(/_/g,'')===k2) return p;
+    for (var a in ALIASES) if (a.replace(/_/g,'')===k2) return ALIASES[a];
+    return null;
+  }
+  function clamp(v,max){ v=Math.round(v); return v<0?0:(v>max?max:v); }
+
+  // Pull the JSON object out of pasted text (tolerates ```json fences / surrounding prose)
+  function extractJSON(text){
+    var t = String(text||'').trim();
+    var fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence) t = fence[1].trim();
+    var a = t.search(/[\[{]/);
+    if (a<0) return null;
+    var b = t.lastIndexOf(t[a]==='[' ? ']' : '}');
+    return b<a ? t.slice(a) : t.slice(a,b+1);   // unclosed → let JSON.parse report the error
+  }
+
+  /* parsePatch(text, channelMap?) -> {ok, errors[], warnings[], ops[{track,param,cc,channel,value}], rampMs}
+     Accepted shapes:
+       {"track":"lead","params":{...}, "channel"?:6, "ramp_ms"?:400}
+       {"tracks":{"lead":{...params}, "bass":{"params":{...},"channel":5}}, "ramp_ms"?:400}
+       [ patch, patch, ... ]                                                                     */
+  function parsePatch(text, channelMap){
+    var res = {ok:false, errors:[], warnings:[], ops:[], rampMs:null};
+    channelMap = channelMap || {};
+    var src = extractJSON(text);
+    if (src===null){ res.errors.push('No JSON object found. Expected something like {"track":"lead","params":{"filter":90}}'); return res; }
+    var obj;
+    try { obj = JSON.parse(src); }
+    catch(e){ res.errors.push('Invalid JSON: '+e.message); return res; }
+    var list = Array.isArray(obj) ? obj : [obj];
+    var entries = [];
+    list.forEach(function(p, pi){
+      if (!p || typeof p!=='object' || Array.isArray(p)){ res.errors.push('Patch #'+(pi+1)+' is not an object'); return; }
+      var r = p.ramp_ms!==undefined ? p.ramp_ms : (p.ramp!==undefined ? p.ramp : p.rampMs);
+      if (r!==undefined){
+        if (typeof r!=='number'||!isFinite(r)||r<0) res.warnings.push('ramp_ms must be a non-negative number; ignored');
+        else res.rampMs = Math.min(Math.round(r), 60000);
+      }
+      if (p.tracks && typeof p.tracks==='object'){
+        Object.keys(p.tracks).forEach(function(tn){
+          var v = p.tracks[tn];
+          if (v && typeof v==='object' && v.params && typeof v.params==='object') entries.push({track:tn, params:v.params, channel:v.channel});
+          else entries.push({track:tn, params:v, channel:undefined});
+        });
+      }
+      if (p.track!==undefined || p.params!==undefined){
+        if (p.track===undefined){ res.errors.push('"params" given without "track"'); }
+        else entries.push({track:p.track, params:p.params, channel:p.channel});
+      }
+      if (!p.tracks && p.track===undefined && p.params===undefined) res.errors.push('Patch #'+(pi+1)+' needs "track"+"params" or "tracks"');
+    });
+    entries.forEach(function(e){
+      var t = resolveTrack(e.track);
+      if (!t){ res.errors.push('Unknown track "'+e.track+'". Valid: '+TRACKS.map(function(x){return x.name;}).join(', ')); return; }
+      var ch = t.defaultChannel;
+      if (channelMap[t.name]) ch = channelMap[t.name];
+      if (e.channel!==undefined){
+        if (typeof e.channel==='number' && e.channel>=1 && e.channel<=16 && Math.round(e.channel)===e.channel) ch = e.channel;
+        else res.warnings.push(t.name+': channel must be an integer 1-16; using '+ch);
+      }
+      if (!e.params || typeof e.params!=='object' || Array.isArray(e.params)){ res.errors.push(t.name+': "params" must be an object'); return; }
+      Object.keys(e.params).forEach(function(pn){
+        var p = resolveParam(pn);
+        var raw = e.params[pn];
+        if (!p){ res.warnings.push(t.name+': unknown parameter "'+pn+'" skipped'); return; }
+        if (!(p in t.labels)){ res.warnings.push(t.name+': "'+p+'" is not used on this track; skipped'); return; }
+        if (typeof raw==='string' && raw.trim()!=='' && !isNaN(+raw)) raw = +raw;
+        if (typeof raw==='boolean' && p==='mute') raw = raw?1:0;
+        if (typeof raw!=='number' || !isFinite(raw)){ res.warnings.push(t.name+'.'+p+': value "'+raw+'" is not a number; skipped'); return; }
+        var def = PARAMS[p], v = clamp(raw, def.max);
+        if (v!==raw) res.warnings.push(t.name+'.'+p+': '+raw+' → '+v+(Math.round(raw)===v?' (rounded)':' (clamped 0-'+def.max+')'));
+        // later entries for the same track/param win
+        res.ops = res.ops.filter(function(o){ return !(o.track===t.name && o.param===p); });
+        res.ops.push({track:t.name, param:p, cc:def.cc, channel:ch, value:v});
+      });
+    });
+    res.ok = res.errors.length===0 && res.ops.length>0;
+    if (!res.errors.length && !res.ops.length) res.errors.push('Patch contained no valid parameters');
+    return res;
+  }
+
+  /* Ramp: integer steps from→to over ms, at most one message per stepMs, no duplicate values */
+  function rampSteps(from, to, ms, stepMs){
+    stepMs = stepMs || 15;
+    if (from===null || from===undefined || !ms || ms<=0 || from===to) return [{t:0, v:to}];
+    var n = Math.max(1, Math.floor(ms/stepMs)), out = [], last = from;
+    for (var i=1;i<=n;i++){
+      var v = Math.round(from + (to-from)*i/n);
+      if (v!==last){ out.push({t:Math.round(ms*i/n), v:v}); last=v; }
+    }
+    if (!out.length || out[out.length-1].v!==to) out.push({t:ms, v:to});
+    return out;
+  }
+
+  function ccMessage(channel, cc, value){ return [0xB0 | ((channel-1)&0x0F), cc&0x7F, value&0x7F]; }
+
+  /* state: {trackName: {param: value}} ; returns patch object */
+  function buildPatch(state, opts){
+    opts = opts||{};
+    function paramsOf(tn){
+      var o={}, s=state[tn]||{}, t=TRACK_BY[tn];
+      Object.keys(PARAMS).forEach(function(p){ if (s[p]!==undefined && s[p]!==null && (p in t.labels)) o[p]=s[p]; });
+      return o;
+    }
+    function chOf(tn){ var c=(opts.channels||{})[tn]; return (c && c!==TRACK_BY[tn].defaultChannel)?c:undefined; }
+    if (opts.all){
+      var tr = {};
+      TRACKS.forEach(function(t){ var p=paramsOf(t.name); if (Object.keys(p).length){ var c=chOf(t.name); tr[t.name]= c?{channel:c,params:p}:p; } });
+      var out = {tracks:tr}; if (opts.rampMs) out.ramp_ms=opts.rampMs; return out;
+    }
+    var single = {track:opts.track, params:paramsOf(opts.track)};
+    var c = chOf(opts.track); if (c) single.channel=c;
+    if (opts.rampMs) single.ramp_ms=opts.rampMs;
+    return single;
+  }
+
+  /* incoming CC -> {track,param,value} using channel map (reverse) */
+  function decodeIncoming(data, channels){
+    if (!data || data.length<3 || (data[0]&0xF0)!==0xB0) return null;
+    var ch=(data[0]&0x0F)+1, cc=data[1], v=data[2], track=null;
+    for (var i=0;i<TRACKS.length;i++){ var t=TRACKS[i]; if ((channels[t.name]||t.defaultChannel)===ch){ track=t; break; } }
+    if (!track) return null;
+    for (var p in PARAMS) if (PARAMS[p].cc===cc && (p in track.labels)) return {track:track.name, param:p, value:clamp(v,PARAMS[p].max), channel:ch, cc:cc};
+    return null;
+  }
+
+  return {PARAMS:PARAMS, TRACKS:TRACKS, TRACK_BY:TRACK_BY, resolveTrack:resolveTrack, resolveParam:resolveParam, clamp:clamp,
+          extractJSON:extractJSON, parsePatch:parsePatch, rampSteps:rampSteps, ccMessage:ccMessage, buildPatch:buildPatch, decodeIncoming:decodeIncoming};
+})();
+if (typeof module!=='undefined' && module.exports) module.exports = OPZ;
+/* ===================== END LOGIC ===================== */
+</script>
+
+<script>
+/* ===================== UI ===================== */
+(function(){
+  'use strict';
+  if (typeof document==='undefined') return;
+  var $ = function(id){ return document.getElementById(id); };
+  var LS_KEY = 'opz-controller-v1';
+  var GROUPS = [
+    ['green','var(--g)',['p1','p2','filter','resonance']],
+    ['blue','var(--b)',['attack','decay','sustain','release']],
+    ['yellow','var(--y)',['lfo_depth','lfo_speed','lfo_target','lfo_shape']],
+    ['red','var(--r)',['fx1','fx2','pan','volume']],
+    ['track','#999',['portamento','note_style']],
+    ['system','#999',['gain','mute']]
+  ];
+  var st = { track:'lead', values:{}, channels:{}, outputId:'', rampMs:0 };
+  try { var saved = JSON.parse(localStorage.getItem(LS_KEY)||'null'); if (saved){ st.channels=saved.channels||{}; st.outputId=saved.outputId||''; st.rampMs=saved.rampMs||0; st.track=saved.track||'lead'; st.values=saved.values||{}; } } catch(e){}
+  function save(){ try{ localStorage.setItem(LS_KEY, JSON.stringify(st)); }catch(e){} }
+  // NB: values are what the page last sent/received; the OP-Z's real state may differ (e.g. after a pattern/preset change).
+
+  var midi=null, out=null, ramps={};
+  function chOf(tn){ return st.channels[tn] || OPZ.TRACK_BY[tn].defaultChannel; }
+
+  /* ---- log ---- */
+  var logEl=$('log');
+  function log(txt, cls){
+    var d=document.createElement('div'); if (cls) d.className=cls;
+    var t=new Date(); d.textContent=t.toTimeString().slice(0,8)+'.'+String(t.getMilliseconds()).padStart(3,'0')+'  '+txt;
+    logEl.appendChild(d); while (logEl.childNodes.length>300) logEl.removeChild(logEl.firstChild);
+    logEl.scrollTop=logEl.scrollHeight;
+  }
+  $('clearLog').onclick=function(){ logEl.innerHTML=''; };
+
+  /* ---- sending ---- */
+  var lastLogKey='', lastLogEl=null;
+  function sendCC(track, param, value, quiet){
+    var def=OPZ.PARAMS[param], ch=chOf(track);
+    value=OPZ.clamp(value, def.max);
+    (st.values[track]=st.values[track]||{})[param]=value;
+    var text='→ ch'+String(ch).padStart(2,' ')+'  CC'+String(def.cc).padStart(3,' ')+' = '+String(value).padStart(3,' ')+'   '+track+'.'+param;
+    if (!out){ text+='  (not sent: no output)'; }
+    else { try { out.send(OPZ.ccMessage(ch, def.cc, value)); } catch(e){ text+='  (send error: '+e.message+')'; } }
+    // collapse consecutive messages for the same control into one updating line
+    var key=track+'.'+param;
+    if (quiet!=='nolog'){
+      if (key===lastLogKey && lastLogEl && lastLogEl===logEl.lastChild){ var t=new Date(); lastLogEl.textContent=t.toTimeString().slice(0,8)+'.'+String(t.getMilliseconds()).padStart(3,'0')+'  '+text; }
+      else { log(text, out?'':'sys'); lastLogEl=logEl.lastChild; lastLogKey=key; }
+    }
+    updateSlider(track, param);
+    markTouched(); scheduleSave();
+  }
+  var saveT=null; function scheduleSave(){ clearTimeout(saveT); saveT=setTimeout(save,300); }
+
+  function cancelRamp(key){ if (ramps[key]){ ramps[key].forEach(clearTimeout); delete ramps[key]; } }
+  function rampTo(track, param, target, ms){
+    var key=track+'.'+param; cancelRamp(key);
+    var from=(st.values[track]||{})[param];
+    var steps=OPZ.rampSteps(from===undefined?null:from, target, ms, 15);
+    if (steps.length===1 && steps[0].t===0){ sendCC(track,param,target); return; }
+    ramps[key]=steps.map(function(s,i){ return setTimeout(function(){ sendCC(track,param,s.v); if (i===steps.length-1) delete ramps[key]; }, s.t); });
+  }
+
+  /* ---- track + params UI ---- */
+  var tracksEl=$('tracks'), paramsEl=$('params'), sliders={};
+  OPZ.TRACKS.forEach(function(t){
+    var b=document.createElement('button'); b.dataset.t=t.name;
+    b.innerHTML=t.name+'<small>'+t.index+'</small>';
+    b.onclick=function(){ st.track=t.name; save(); renderTrack(); };
+    tracksEl.appendChild(b);
+  });
+  var chanSel=$('chanSel');
+  for (var c=1;c<=16;c++){ var o=document.createElement('option'); o.value=c; o.textContent=c; chanSel.appendChild(o); }
+  chanSel.onchange=function(){
+    var v=+chanSel.value, t=OPZ.TRACK_BY[st.track];
+    if (v===t.defaultChannel) delete st.channels[st.track]; else st.channels[st.track]=v;
+    log('channel for '+st.track+' set to '+v+(v===t.defaultChannel?' (default)':' (custom)'),'sys'); save(); renderTrackButtons();
+  };
+
+  function markTouched(){ renderTrackButtons(); }
+  function renderTrackButtons(){
+    Array.prototype.forEach.call(tracksEl.children, function(b){
+      var tn=b.dataset.t, has=st.values[tn] && Object.keys(st.values[tn]).length;
+      b.className=(tn===st.track?'on ':'')+(has?'touched':'');
+      b.querySelector('small').textContent='ch '+chOf(tn);
+    });
+  }
+  function updateSlider(track, param){
+    if (track!==st.track || !sliders[param]) return;
+    var v=(st.values[track]||{})[param], s=sliders[param];
+    s.row.classList.toggle('unset', v===undefined);
+    if (v!==undefined){ if (+s.input.value!==v) s.input.value=v; s.val.textContent=v; }
+    else { s.val.textContent='–'; }
+  }
+  function renderTrack(){
+    var t=OPZ.TRACK_BY[st.track]; $('trkName').textContent=t.name; chanSel.value=chOf(t.name);
+    renderTrackButtons(); paramsEl.innerHTML=''; sliders={};
+    var any=false;
+    GROUPS.forEach(function(g){
+      var ps=g[2].filter(function(p){ return p in t.labels; }); if (!ps.length) return; any=true;
+      var h=document.createElement('div'); h.className='group'; h.innerHTML='<i style="background:'+g[1]+'"></i>'+g[0]; paramsEl.appendChild(h);
+      ps.forEach(function(p){
+        var def=OPZ.PARAMS[p], row=document.createElement('div'); row.className='p';
+        var inf=t.inferred.indexOf(p)>=0;
+        var nm=document.createElement('div'); nm.className='nm';
+        nm.title=p+' — CC '+def.cc+' ('+def.name+' in the official MIDI table)'+(inf?' · label inferred from the dial chart':'');
+        nm.innerHTML=(inf?'<span class="inf">≈ </span>':'')+escapeHtml(t.labels[p])+' <code>'+p+' · cc'+def.cc+'</code>';
+        var inp=document.createElement('input'); inp.type='range'; inp.min=0; inp.max=def.max; inp.step=1;
+        var cur=(st.values[t.name]||{})[p]; inp.value=cur===undefined?(def.max===1?0:64):cur;
+        var val=document.createElement('div'); val.className='v';
+        inp.addEventListener('input', function(){ var v=+inp.value; cancelRamp(t.name+'.'+p); if ((st.values[t.name]||{})[p]!==v) sendCC(t.name,p,v); });
+        row.appendChild(nm); row.appendChild(inp); row.appendChild(val); paramsEl.appendChild(row);
+        sliders[p]={row:row,input:inp,val:val}; updateSlider(t.name,p);
+      });
+    });
+    if (!any){ var e=document.createElement('div'); e.className='empty'; e.textContent='No CC-controllable sound parameters are documented for the '+t.name+' track (punch-in effects are played with notes, not CCs).'; paramsEl.appendChild(e); }
+  }
+  function escapeHtml(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+  $('sendAllBtn').onclick=function(){
+    var s=st.values[st.track]||{}, ks=Object.keys(s); if (!ks.length){ log('nothing to send for '+st.track,'sys'); return; }
+    ks.forEach(function(p){ sendCC(st.track,p,s[p]); });
+  };
+  $('resetTrkBtn').onclick=function(){ delete st.values[st.track]; save(); renderTrack(); log('forgot page values for '+st.track,'sys'); };
+
+  /* ---- patch apply / export ---- */
+  var rampEl=$('rampMs'); rampEl.value=st.rampMs; rampEl.onchange=function(){ st.rampMs=Math.max(0,+rampEl.value||0); save(); };
+  function showMsg(lines){
+    var m=$('patchMsg'); m.innerHTML='';
+    lines.forEach(function(l){ var d=document.createElement('div'); d.className=l[0]; d.textContent=l[1]; m.appendChild(d); });
+  }
+  $('applyBtn').onclick=function(){
+    var r=OPZ.parsePatch($('patchIn').value, st.channels), lines=[];
+    r.errors.forEach(function(e){ lines.push(['e','✕ '+e]); });
+    r.warnings.forEach(function(w){ lines.push(['w','! '+w]); });
+    if (!r.ok){ showMsg(lines); return; }
+    var ms = r.rampMs!==null ? r.rampMs : (+rampEl.value||0);
+    if (!out) lines.push(['w','! No MIDI output selected — values stored in the page only.']);
+    lines.unshift(['o','✓ '+r.ops.length+' parameter'+(r.ops.length>1?'s':'')+' applied'+(ms?' (ramp '+ms+' ms)':'')]);
+    showMsg(lines);
+    log('— apply patch: '+r.ops.length+' params'+(ms?', ramp '+ms+'ms':''),'sys');
+    var tracksTouched={};
+    r.ops.forEach(function(o){
+      if (o.channel!==chOf(o.track)){ // patch carried an explicit channel override
+        if (o.channel===OPZ.TRACK_BY[o.track].defaultChannel) delete st.channels[o.track]; else st.channels[o.track]=o.channel;
+      }
+      tracksTouched[o.track]=1; rampTo(o.track,o.param,o.value,ms);
+    });
+    var tt=Object.keys(tracksTouched); if (tt.length===1 && tt[0]!==st.track){ st.track=tt[0]; renderTrack(); }
+    save();
+  };
+  $('patchIn').addEventListener('keydown',function(e){ if ((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); $('applyBtn').click(); } });
+  $('copyBtn').onclick=function(){
+    var p=OPZ.buildPatch(st.values,{track:st.track, all:$('exportAll').checked, channels:st.channels});
+    var txt=JSON.stringify(p);
+    var done=function(){ showMsg([['o','✓ Copied: '+txt]]); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fallback); else fallback();
+    function fallback(){ var ta=$('patchIn'); ta.value=txt; ta.select(); try{ document.execCommand('copy'); done(); }catch(e){ showMsg([['w','Copy blocked by browser — the code is in the box above, copy it manually.']]); } }
+  };
+
+  /* ---- Web MIDI ---- */
+  var outSel=$('outSel'), status=$('status');
+  function setStatus(t,cls){ status.textContent=t; status.className='status '+(cls||''); }
+  function refreshPorts(){
+    if (!midi) return;
+    var prev=outSel.value||st.outputId; outSel.innerHTML='<option value="">— none —</option>';
+    var auto='';
+    midi.outputs.forEach(function(o){ var op=document.createElement('option'); op.value=o.id; op.textContent=o.name+(o.manufacturer?' ('+o.manufacturer+')':''); outSel.appendChild(op); if (/op-?z/i.test(o.name)&&!auto) auto=o.id; });
+    var pick = (prev && midi.outputs.get(prev)) ? prev : auto;
+    outSel.value=pick||''; selectOutput();
+    attachInputs();
+  }
+  function selectOutput(){
+    out = outSel.value ? midi.outputs.get(outSel.value) : null;
+    st.outputId = outSel.value; save();
+    if (out) setStatus('sending to '+out.name,'ok'); else setStatus(midi.outputs.size? 'choose an output' : 'no MIDI outputs found — is the OP-Z plugged in (not in disk/content mode)?', 'err');
+  }
+  outSel.onchange=function(){ selectOutput(); attachInputs(); if (out) log('output: '+out.name,'sys'); };
+  function attachInputs(){
+    if (!midi) return;
+    midi.inputs.forEach(function(inp){ inp.onmidimessage=null; });
+    if (!$('syncIn').checked || !out) return;
+    midi.inputs.forEach(function(inp){
+      if (inp.name!==out.name && !(/op-?z/i.test(inp.name) && /op-?z/i.test(out.name))) return;
+      inp.onmidimessage=function(ev){
+        var d=OPZ.decodeIncoming(ev.data, st.channels); if (!d) return;
+        cancelRamp(d.track+'.'+d.param); // a physical knob move wins over a running ramp
+        (st.values[d.track]=st.values[d.track]||{})[d.param]=d.value;
+        var key='in:'+d.track+'.'+d.param, text='← ch'+String(d.channel).padStart(2,' ')+'  CC'+String(d.cc).padStart(3,' ')+' = '+String(d.value).padStart(3,' ')+'   '+d.track+'.'+d.param;
+        if (key===lastLogKey && lastLogEl===logEl.lastChild){ lastLogEl.textContent=new Date().toTimeString().slice(0,8)+'.000  '+text; }
+        else { log(text,'in'); lastLogEl=logEl.lastChild; lastLogKey=key; }
+        updateSlider(d.track,d.param); renderTrackButtons(); scheduleSave();
+      };
+    });
+  }
+  $('syncIn').onchange=attachInputs;
+
+  function connect(){
+    if (!navigator.requestMIDIAccess){ setStatus('Web MIDI not supported here — use Chrome or Edge on desktop','err'); log('navigator.requestMIDIAccess missing','sys'); return; }
+    setStatus('requesting MIDI access…');
+    navigator.requestMIDIAccess({sysex:false}).then(function(m){
+      midi=m; $('connectBtn').textContent='Rescan';
+      m.onstatechange=function(e){ log('port '+e.port.type+' "'+e.port.name+'" '+e.port.state,'sys'); refreshPorts(); };
+      refreshPorts(); log('MIDI ready: '+m.outputs.size+' output(s)','sys');
+    }, function(err){
+      setStatus('MIDI access denied: '+(err&&err.message||err),'err');
+      log('MIDI access denied. Allow MIDI for this page (site settings) or serve it over http://localhost','sys');
+    });
+  }
+  $('connectBtn').onclick=function(){ if (midi) refreshPorts(); else connect(); };
+
+  renderTrack();
+  connect();
+})();
+</script>
+</body>
+</html>
