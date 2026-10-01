@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OP-Z Patch Controller</title>
+<title>OP-Z Patch Controller + Song player</title>
 <style>
   :root{--bg:#f4f4f2;--card:#fff;--ink:#1d1d1f;--mute:#8a8a8e;--line:#e2e2df;--acc:#ff5a1f;--ok:#1a9e55;--err:#d0312d;--warn:#b7791f;
     --g:#2fb35a;--b:#2d7ff9;--y:#e8b90c;--r:#e5463b;}
@@ -49,6 +49,24 @@
   .note{font-size:11px;color:var(--mute);margin-top:8px}
   .side{display:flex;flex-direction:column;gap:18px}
   .empty{color:var(--mute);font-size:12px;padding:8px 0}
+  /* song player */
+  .song{grid-column:1/-1}
+  .song .row{gap:12px}
+  .song button,.song select,.song input[type=number]{min-height:44px;touch-action:manipulation}
+  .song input[type=number]{font-size:16px;width:90px}
+  .song input[type=checkbox]{width:22px;height:22px}
+  #playBtn{min-width:120px;font-size:17px;font-weight:600;background:var(--ok);border-color:var(--ok)}
+  #playBtn.on{background:var(--err);border-color:var(--err)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{border:0;border-radius:0;background:#fff;color:var(--ink);padding:6px 14px}
+  .seg button.on{background:var(--ink);color:#fff}
+  .pos{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;font:13px ui-monospace,Menlo,Consolas,monospace;background:#fbfbfa;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin:10px 0}
+  .pos b{font-size:30px;line-height:1;min-width:26px;color:var(--acc)}
+  .pos .bars{display:inline-flex;gap:4px}
+  .pos .bars i{width:16px;height:16px;border-radius:3px;background:var(--line);display:inline-block}
+  .pos .bars i.on{background:var(--acc)}
+  .song details summary{cursor:pointer;font-size:12px;color:var(--mute);padding:6px 0;min-height:32px}
+  .song textarea{min-height:220px}
 </style>
 </head>
 <body>
@@ -61,6 +79,30 @@
 </header>
 
 <main>
+  <section class="card song" id="songCard">
+    <h2>Song player</h2>
+    <div class="row">
+      <button id="playBtn">▶ Play</button>
+      <label class="inl">BPM <input type="number" id="bpm" min="20" max="300" step="0.5" value="135" inputmode="decimal"></label>
+      <span class="seg" id="modeSeg"><button data-m="preview">Preview A–H once</button><button data-m="song">Full song</button></span>
+      <label class="inl"><input type="checkbox" id="sendClock"> send MIDI clock (24 ppq + start/stop)</label>
+      <button class="ghost" id="panicBtn" title="Note-off + CC123 all-notes-off on channels 1-16">All notes off</button>
+    </div>
+    <div class="pos" id="songPos"><b id="posSec">–</b><span id="posRep">stopped</span><span class="bars" id="posBars"></span><span id="posBar"></span><span id="posTime"></span></div>
+    <div class="msg" id="songMsg"></div>
+    <details id="arrDetails">
+      <summary>Arrangement JSON (paste a new one from the assistant, then Load)</summary>
+      <textarea id="arrIn" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="loadArrBtn">Load</button>
+        <button class="ghost" id="builtinBtn">Restore built-in</button>
+        <button class="ghost" id="copyArrBtn">Copy</button>
+        <label class="inl">lookahead <input type="number" id="lookahead" min="0" max="500" step="10" value="100"> ms</label>
+      </div>
+      <div class="note">Notes are sent ahead of time with timestamps (lookahead scheduler, 25 ms tick). If timing sounds loose in your MIDI app, try lookahead 0. Keep the screen awake while playing. Format: see PATCH_FORMAT.md §7.</div>
+    </details>
+  </section>
+
   <section class="card">
     <h2>Track</h2>
     <div class="tracks" id="tracks"></div>
@@ -311,8 +353,313 @@ var OPZ = (function(){
   return {PARAMS:PARAMS, TRACKS:TRACKS, TRACK_BY:TRACK_BY, resolveTrack:resolveTrack, resolveParam:resolveParam, clamp:clamp,
           extractJSON:extractJSON, parsePatch:parsePatch, rampSteps:rampSteps, ccMessage:ccMessage, buildPatch:buildPatch, decodeIncoming:decodeIncoming};
 })();
-if (typeof module!=='undefined' && module.exports) module.exports = OPZ;
 /* ===================== END LOGIC ===================== */
+
+/* ===================== SONG PLAYER LOGIC (pure, DOM-free; tested under node) ===================== */
+OPZ.SONG = (function(OPZ){
+  'use strict';
+  var NOTE_IDX = {c:0,d:2,e:4,f:5,g:7,a:9,b:11};
+  // "F#2" / "Gb4" / 60  ->  MIDI note number (C4 = 60)
+  function noteNum(n){
+    if (typeof n==='number') return (isFinite(n) && n>=0 && n<=127 && Math.round(n)===n) ? n : null;
+    var m = String(n).trim().match(/^([A-Ga-g])([#b♯♭]?)(-?\d)$/);
+    if (!m) return (/^\d+$/.test(String(n).trim())) ? noteNum(+n) : null;
+    var v = NOTE_IDX[m[1].toLowerCase()] + (m[2]==='#'||m[2]==='♯' ? 1 : (m[2]==='b'||m[2]==='♭' ? -1 : 0)) + (+m[3]+1)*12;
+    return v>=0 && v<=127 ? v : null;
+  }
+  // "bar:beat" (1-based, beat may be fractional, e.g. "1:3.5") or number (0-based beats) -> beats from pattern start
+  function parsePos(p, bpb){
+    if (typeof p==='number' && isFinite(p)) return p;
+    var m = String(p).trim().match(/^(\d+)\s*[:.]\s*(\d+(?:\.\d+)?)$/);
+    if (m) return (+m[1]-1)*bpb + (+m[2]-1);
+    m = String(p).trim().match(/^(\d+(?:\.\d+)?)$/);
+    return m ? +m[1] : null;
+  }
+  var DRUMS = {kick:1,snare:1,perc:1,sample:1};
+
+  /* compile(arrangement object | JSON text, {mode:'song'|'preview', channels:{track:ch}})
+     -> {ok, errors[], warnings[], events[{b,type:'on'|'off'|'cc',d:[bytes],ch,track,param?,value?,note?}],
+         sections[{name,rep,reps,startBeat,beats}], totalBeats, bpm, bpb, bars, usedChannels[] } */
+  function compile(arr, opts){
+    opts = opts||{};
+    var R = {ok:false, errors:[], warnings:[], events:[], sections:[], totalBeats:0, bpm:135, bpb:4, bars:0, usedChannels:[]};
+    var chanMap = opts.channels||{};
+    if (typeof arr==='string'){
+      var src = OPZ.extractJSON(arr);
+      if (src===null){ R.errors.push('No JSON object found in the arrangement box'); return R; }
+      try { arr = JSON.parse(src); } catch(e){ R.errors.push('Invalid JSON: '+e.message); return R; }
+    }
+    if (!arr || typeof arr!=='object' || Array.isArray(arr)){ R.errors.push('Arrangement must be a JSON object'); return R; }
+    var bpb = arr.beats_per_bar||4, bpp = arr.bars_per_pattern||4, PB = bpb*bpp;
+    if (!(bpb>=1 && bpb<=16) || !(bpp>=1 && bpp<=64)){ R.errors.push('beats_per_bar must be 1-16 and bars_per_pattern 1-64'); return R; }
+    R.bpb = bpb;
+    R.bpm = (typeof arr.bpm==='number' && arr.bpm>=20 && arr.bpm<=300) ? arr.bpm : 135;
+    if (arr.bpm!==undefined && R.bpm!==arr.bpm) R.warnings.push('bpm must be 20-300; using 135');
+    var parts = arr.parts||{}, patterns = arr.patterns||{};
+    var list = opts.mode==='preview' ? arr.preview : arr.song;
+    if (!Array.isArray(list) || !list.length){ R.errors.push('"'+(opts.mode==='preview'?'preview':'song')+'" must be a non-empty array of {"p":"A","x":2}'); return R; }
+    function chOf(tn){ return chanMap[tn] || OPZ.TRACK_BY[tn].defaultChannel; }
+    var used = {};
+
+    // --- expand one part into relative events [{b,type,note|param,value,vel,len,track}]
+    var cache = {};
+    function expandPart(name){
+      if (cache[name]) return cache[name];
+      var p = parts[name], out = [];
+      if (!p || typeof p!=='object'){ R.errors.push('Unknown part "'+name+'"'); return (cache[name]=null); }
+      var t = OPZ.resolveTrack(p.track);
+      if (!t){ R.errors.push('Part "'+name+'": unknown track "'+p.track+'"'); return (cache[name]=null); }
+      var bars = Array.isArray(p.bars) ? p.bars : null;
+      function inBars(b){ return !bars || bars.indexOf(Math.floor(b/bpb)+1)>=0; }
+      // CC part
+      if (p.cc!==undefined){
+        var param = typeof p.cc==='number' ? null : OPZ.resolveParam(p.cc), cc;
+        if (typeof p.cc==='number'){ for (var k in OPZ.PARAMS) if (OPZ.PARAMS[k].cc===p.cc) param=k; }
+        if (!param || !(param in t.labels)){ R.errors.push('Part "'+name+'": cc "'+p.cc+'" is not a known parameter of '+t.name); return (cache[name]=null); }
+        cc = OPZ.PARAMS[param].cc; var max = OPZ.PARAMS[param].max;
+        if (p.from!==undefined && p.to!==undefined){              // ramp
+          var s = parsePos(p.start!==undefined?p.start:0, bpb), e = parsePos(p.end!==undefined?p.end:PB, bpb);
+          if (s===null||e===null||e<=s){ R.errors.push('Part "'+name+'": ramp needs start < end'); return (cache[name]=null); }
+          var steps = Math.max(1, Math.min(512, Math.round(p.steps || (e-s)*8))), last=null;
+          for (var i=0;i<=steps;i++){
+            var v = OPZ.clamp(p.from + (p.to-p.from)*i/steps, max);
+            if (v!==last){ out.push({b:s+(e-s)*i/steps, type:'cc', param:param, cc:cc, value:v, track:t.name}); last=v; }
+          }
+        } else {
+          var at = Array.isArray(p.at) ? p.at : [p.at!==undefined?p.at:0];
+          if (typeof p.value!=='number'){ R.errors.push('Part "'+name+'": cc part needs "value" or "from"/"to"'); return (cache[name]=null); }
+          at.forEach(function(a){ var b=parsePos(a,bpb); if (b===null) R.errors.push('Part "'+name+'": bad position "'+a+'"'); else out.push({b:b,type:'cc',param:param,cc:cc,value:OPZ.clamp(p.value,max),track:t.name}); });
+        }
+        return (cache[name]={track:t.name, ev:out});
+      }
+      // note part
+      var notes = p.notes!==undefined ? (Array.isArray(p.notes)?p.notes:[p.notes]) : (DRUMS[t.name] ? [ (arr.drum_notes||{})[t.name]!==undefined ? arr.drum_notes[t.name] : 60 ] : null);
+      if (!notes){ R.errors.push('Part "'+name+'": synth parts need "notes"'); return (cache[name]=null); }
+      var nn = notes.map(noteNum);
+      if (nn.some(function(x){return x===null;})){ R.errors.push('Part "'+name+'": bad note in '+JSON.stringify(notes)+' (use 0-127 or names like "F#2", C4=60)'); return (cache[name]=null); }
+      var pos = [];
+      if (p.at!==undefined){ (Array.isArray(p.at)?p.at:[p.at]).forEach(function(a){ var b=parsePos(a,bpb); if (b===null||b<0) R.errors.push('Part "'+name+'": bad position "'+a+'"'); else pos.push(b); }); }
+      else if (p.every>0){ for (var b=(p.offset||0); b<PB-1e-9; b+=p.every) pos.push(Math.round(b*1e6)/1e6); }
+      else { R.errors.push('Part "'+name+'": needs "at" or "every"'); return (cache[name]=null); }
+      pos = pos.filter(inBars);
+      var len = typeof p.len==='number' && p.len>0 ? p.len : 0.25;
+      pos.forEach(function(b, i){
+        var vel = p.vel===undefined ? 100 : p.vel;
+        if (Array.isArray(vel)) vel = vel[i % vel.length];
+        else if (vel && typeof vel==='object') vel = vel.from + (vel.to-vel.from)*(pos.length>1 ? i/(pos.length-1) : 1);
+        vel = Math.max(1, Math.min(127, Math.round(+vel||100)));
+        nn.forEach(function(n){
+          if (p.release){ out.push({b:b, type:'off', note:n, track:t.name}); return; }
+          out.push({b:b, type:'on', note:n, vel:vel, track:t.name});
+          if (!p.hold) out.push({b:b+len, type:'off', note:n, track:t.name, pairStart:b});
+        });
+      });
+      return (cache[name]={track:t.name, ev:out});
+    }
+
+    // --- start CCs (validated through the normal patch parser)
+    var startOps = [];
+    if (arr.start_ccs){
+      var pr = OPZ.parsePatch(JSON.stringify({tracks:arr.start_ccs}), chanMap);
+      pr.errors.forEach(function(e){ R.errors.push('start_ccs: '+e); });
+      pr.warnings.forEach(function(w){ R.warnings.push('start_ccs: '+w); });
+      startOps = pr.ops;
+    }
+    startOps.forEach(function(o){ R.events.push({b:0, type:'cc', d:OPZ.ccMessage(o.channel,o.cc,o.value), ch:o.channel, track:o.track, param:o.param, value:o.value, pri:0}); used[o.channel]=1; });
+
+    // --- walk the song
+    var beat = 0;
+    list.forEach(function(en, ei){
+      if (typeof en==='string') en = {p:en};
+      var pat = patterns[en.p];
+      if (!pat){ R.errors.push('Song entry #'+(ei+1)+': unknown pattern "'+en.p+'"'); return; }
+      var pparts = Array.isArray(pat) ? pat : (pat.parts||[]);
+      var x = en.x===undefined ? 1 : en.x;
+      if (!(x>=1 && x<=256 && Math.round(x)===x)){ R.errors.push('Song entry #'+(ei+1)+': "x" must be an integer 1-256'); return; }
+      var names = pparts.filter(function(n){ return (en.remove||[]).indexOf(n)<0; }).concat(en.add||[]);
+      var mute = en.mute_bars||{};
+      var patCCs = null;
+      if (!Array.isArray(pat) && pat.ccs){
+        var pc = OPZ.parsePatch(JSON.stringify({tracks:pat.ccs}), chanMap);
+        pc.errors.forEach(function(e){ R.errors.push('pattern '+en.p+' ccs: '+e); });
+        pc.warnings.forEach(function(w){ R.warnings.push('pattern '+en.p+' ccs: '+w); });
+        patCCs = pc.ops;
+      }
+      for (var r=0;r<x;r++){
+        R.sections.push({name:en.p, rep:r+1, reps:x, entry:ei, startBeat:beat, beats:PB});
+        (patCCs||[]).forEach(function(o){ R.events.push({b:beat, type:'cc', d:OPZ.ccMessage(o.channel,o.cc,o.value), ch:o.channel, track:o.track, param:o.param, value:o.value, pri:0}); used[o.channel]=1; });
+        names.forEach(function(nm){
+          var ex = expandPart(nm); if (!ex) return;
+          var mb = mute[nm], mt = (parts[ex.track]===undefined) ? mute[ex.track] : null;
+          var ch = chOf(ex.track); used[ch]=1;
+          // pair on/off so a muted hit drops both
+          ex.ev.forEach(function(e){
+            var bar = Math.floor(e.b/bpb)+1;
+            if (e.type==='off' && e.pairStart!==undefined) bar = Math.floor(e.pairStart/bpb)+1;
+            if ((mb && mb.indexOf(bar)>=0) || (mt && mt.indexOf(bar)>=0)) return;
+            var ev = {b:beat+e.b, ch:ch, track:ex.track, type:e.type};
+            if (e.type==='cc'){ ev.param=e.param; ev.value=e.value; ev.d=OPZ.ccMessage(ch,e.cc,e.value); ev.pri=1; }
+            else if (e.type==='on'){ ev.note=e.note; ev.d=[0x90|(ch-1), e.note, e.vel]; ev.pri=2; }
+            else { ev.note=e.note; ev.d=[0x80|(ch-1), e.note, 0]; ev.pri=-1; }
+            R.events.push(ev);
+          });
+        });
+        beat += PB;
+      }
+    });
+    // number repeats across consecutive entries of the same pattern (D x5 + special D x1 -> D 1/6 .. 6/6)
+    for (var i=0;i<R.sections.length;){
+      var j=i; while (j<R.sections.length && R.sections[j].name===R.sections[i].name) j++;
+      for (var q=i;q<j;q++){ R.sections[q].rep=q-i+1; R.sections[q].reps=j-i; }
+      i=j;
+    }
+    R.totalBeats = beat; R.bars = beat/bpb;
+    R.events.sort(function(a,b){ return a.b-b.b || a.pri-b.pri; });
+    R.usedChannels = Object.keys(used).map(Number).sort(function(a,b){return a-b;});
+    R.ok = R.errors.length===0;
+    return R;
+  }
+  function fmtTime(sec){ sec=Math.max(0,Math.floor(sec)); return Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0'); }
+  function sectionAt(C, beat){
+    var s = C.sections, lo=0, hi=s.length-1, ans=0;
+    while (lo<=hi){ var m=(lo+hi)>>1; if (s[m].startBeat<=beat){ ans=m; lo=m+1; } else hi=m-1; }
+    return s[ans];
+  }
+
+  /* Player: lookahead scheduler.
+     env = {getOutput(), now(), setInterval, clearInterval, intervalMs=25, lookaheadMs=100,
+            onCC(track,param,value), onEnd()}                                                  */
+  function Player(env){
+    this.env = env; this.playing=false; this.C=null;
+  }
+  Player.prototype.play = function(C, o){
+    o=o||{}; var env=this.env;
+    if (this.playing) this.stop();
+    this.C=C; this.bpm=o.bpm||C.bpm; this.clock=!!o.clock;
+    this.idx=0; this.on={}; this.lastTs=0; this.nextClock=0;
+    var now=env.now(); this.t0=now+(o.startDelayMs===undefined?60:o.startDelayMs); this.b0=0;
+    this.playing=true;
+    var out=env.getOutput();
+    if (this.clock && out){ try{ out.send([0xFA], this.t0); }catch(e){} }
+    var self=this;
+    this.timer = (env.setInterval||setInterval)(function(){ self.tick(); }, env.intervalMs||25);
+    this.tick();
+  };
+  Player.prototype.beatToTime = function(b){ return this.t0 + (b-this.b0)*60000/this.bpm; };
+  Player.prototype.currentBeat = function(){
+    if (!this.playing) return 0;
+    return Math.max(0, this.b0 + (this.env.now()-this.t0)*this.bpm/60000);
+  };
+  Player.prototype.setBpm = function(bpm){
+    if (!(bpm>=20 && bpm<=300)) return;
+    if (this.playing){ var now=this.env.now(); var b=this.currentBeat(); if (now>this.t0){ this.b0=b; this.t0=now; } }
+    this.bpm=bpm;
+  };
+  Player.prototype.tick = function(){
+    if (!this.playing) return;
+    var env=this.env, out=env.getOutput(), now=env.now(), horizon=now+(env.lookaheadMs===undefined?100:env.lookaheadMs);
+    var C=this.C, ev=C.events;
+    while (this.idx<ev.length && this.beatToTime(ev[this.idx].b)<=horizon){
+      var e=ev[this.idx++], ts=Math.max(this.beatToTime(e.b), now);
+      if (out){ try { out.send(e.d, ts); } catch(err){} }
+      if (ts>this.lastTs) this.lastTs=ts;
+      var k=e.ch+':'+e.note;
+      if (e.type==='on') this.on[k]=[e.ch,e.note]; else if (e.type==='off') delete this.on[k];
+      else if (e.type==='cc' && env.onCC) env.onCC(e.track,e.param,e.value);
+    }
+    if (this.clock){
+      while (this.nextClock < C.totalBeats-1e-9 && this.beatToTime(this.nextClock)<=horizon){
+        var t=Math.max(this.beatToTime(this.nextClock), now);
+        if (out){ try{ out.send([0xF8], t); }catch(err){} }
+        if (t>this.lastTs) this.lastTs=t;
+        this.nextClock += 1/24;
+      }
+    }
+    if (this.idx>=ev.length && now>=this.beatToTime(C.totalBeats)) this.stop(true);
+  };
+  /* Stop: note-offs for every sounding note + CC123 (all notes off) on every used channel,
+     sent now AND again just after the last already-scheduled timestamp (those can't be recalled). */
+  Player.prototype.stop = function(natural){
+    if (!this.playing) return;
+    var env=this.env, out=env.getOutput(), now=env.now(), self=this;
+    (env.clearInterval||clearInterval)(this.timer);
+    this.playing=false;
+    if (out){
+      if (typeof out.clear==='function'){ try{ out.clear(); }catch(e){} }
+      var times=[now]; if (this.lastTs>now) times.push(this.lastTs+1);
+      times.forEach(function(ts){
+        Object.keys(self.on).forEach(function(k){ var n=self.on[k]; try{ out.send([0x80|(n[0]-1), n[1], 0], ts); }catch(e){} });
+        self.C.usedChannels.forEach(function(ch){ try{ out.send([0xB0|(ch-1), 123, 0], ts); }catch(e){} });
+        if (self.clock){ try{ out.send([0xFC], ts); }catch(e){} }
+      });
+    }
+    this.on={};
+    if (env.onEnd) env.onEnd(!!natural);
+  };
+
+  return {noteNum:noteNum, parsePos:parsePos, compile:compile, Player:Player, fmtTime:fmtTime, sectionAt:sectionAt};
+})(OPZ);
+/* ===================== END SONG LOGIC ===================== */
+if (typeof module!=='undefined' && module.exports) module.exports = OPZ;
+</script>
+
+<script type="application/json" id="builtinArr">
+{
+  "name": "F hypnotic 135 (built-in)",
+  "bpm": 135,
+  "beats_per_bar": 4,
+  "bars_per_pattern": 4,
+  "drum_notes": {"kick": 60, "snare": 60, "perc": 60},
+  "start_ccs": {
+    "kick":  {"filter": 60, "resonance": 30, "decay": 40},
+    "bass":  {"filter": 40, "resonance": 80, "attack": 0, "decay": 45, "sustain": 20, "release": 15, "portamento": 20},
+    "perc":  {"filter": 100, "decay": 20, "sustain": 0},
+    "lead":  {"filter": 75, "resonance": 50, "attack": 0, "decay": 35, "sustain": 10, "release": 25, "fx2": 55},
+    "chord": {"attack": 70, "decay": 90, "sustain": 110, "release": 100, "volume": 0}
+  },
+  "parts": {
+    "kick5":     {"track": "kick",  "at": ["1:1", "1:3.5", "2:3", "3:1", "4:2.5"], "vel": 115, "len": 0.25},
+    "snare24":   {"track": "snare", "every": 2, "offset": 1, "vel": 100, "len": 0.25},
+    "hats8":     {"track": "perc",  "every": 1, "offset": 0.5, "vel": 90, "len": 0.125},
+    "hats16":    {"track": "perc",  "every": 0.25, "vel": [60, 45, 100, 45], "len": 0.125},
+    "bass_fs":   {"track": "bass",  "notes": ["F#2"], "at": ["1:1", "1:3.5", "2:3", "3:1", "4:2.5"], "vel": 105, "len": 0.25},
+    "bass_f":    {"track": "bass",  "notes": ["F2"],  "at": ["1:1", "1:3.5", "2:3", "3:1", "4:2.5"], "vel": 105, "len": 0.25},
+    "stab":      {"track": "lead",  "notes": ["F4", "Ab4", "C5"], "at": ["1:2.5", "3:2.5"], "vel": 100, "len": 0.25},
+    "drop_roll": {"track": "snare", "every": 0.25, "bars": [4], "vel": {"from": 35, "to": 127}, "len": 0.125},
+    "pad_on":    {"track": "chord", "notes": ["F3", "Ab3", "C4", "Gb4"], "at": ["4:1"], "vel": 90, "hold": true},
+    "pad_swell": {"track": "chord", "cc": "volume", "from": 0, "to": 100, "start": "4:1", "end": "5:1"},
+    "pad_off":   {"track": "chord", "notes": ["F3", "Ab3", "C4", "Gb4"], "at": ["2:1"], "release": true}
+  },
+  "patterns": {
+    "A": {"parts": ["kick5", "snare24", "hats8", "bass_fs"]},
+    "B": {"parts": ["kick5", "snare24", "hats8", "bass_fs", "stab"]},
+    "C": {"parts": ["kick5", "snare24", "hats16", "bass_fs"], "ccs": {"perc": {"filter": 115}}},
+    "D": {"parts": ["kick5", "snare24", "hats8", "bass_fs", "stab"], "ccs": {"perc": {"filter": 100}}},
+    "E": {"parts": ["snare24", "hats8"]},
+    "F": {"parts": ["snare24", "hats16"], "ccs": {"perc": {"filter": 115}}},
+    "G": {"parts": ["kick5", "snare24", "hats8", "bass_f"], "ccs": {"perc": {"filter": 100}}},
+    "H": {"parts": ["kick5", "snare24", "hats8", "bass_fs"]}
+  },
+  "song": [
+    {"p": "A", "x": 6},
+    {"p": "B", "x": 6},
+    {"p": "C", "x": 9},
+    {"p": "D", "x": 5},
+    {"p": "D", "x": 1, "add": ["drop_roll", "pad_on", "pad_swell"], "mute_bars": {"snare24": [4]}},
+    {"p": "E", "x": 6},
+    {"p": "F", "x": 6},
+    {"p": "G", "x": 1, "add": ["pad_off"], "mute_bars": {"kick": [1], "bass": [1]}},
+    {"p": "G", "x": 5},
+    {"p": "H", "x": 9}
+  ],
+  "preview": [
+    {"p": "A"}, {"p": "B"}, {"p": "C"},
+    {"p": "D", "add": ["drop_roll", "pad_on", "pad_swell"], "mute_bars": {"snare24": [4]}},
+    {"p": "E"}, {"p": "F"},
+    {"p": "G", "add": ["pad_off"], "mute_bars": {"kick": [1], "bass": [1]}},
+    {"p": "H"}
+  ]
+}
 </script>
 
 <script>
@@ -512,7 +859,7 @@ if (typeof module!=='undefined' && module.exports) module.exports = OPZ;
   $('syncIn').onchange=attachInputs;
 
   function connect(){
-    if (!navigator.requestMIDIAccess){ setStatus('Web MIDI not supported here — use Chrome or Edge on desktop','err'); log('navigator.requestMIDIAccess missing','sys'); return; }
+    if (!navigator.requestMIDIAccess){ setStatus('Web MIDI not supported here — use Chrome/Edge, or the Web MIDI Browser app on iPad','err'); log('navigator.requestMIDIAccess missing','sys'); return; }
     setStatus('requesting MIDI access…');
     navigator.requestMIDIAccess({sysex:false}).then(function(m){
       midi=m; $('connectBtn').textContent='Rescan';
@@ -524,6 +871,82 @@ if (typeof module!=='undefined' && module.exports) module.exports = OPZ;
     });
   }
   $('connectBtn').onclick=function(){ if (midi) refreshPorts(); else connect(); };
+
+  /* ---- song player ---- */
+  var SONG_KEY='opz-song-v1', BUILTIN=$('builtinArr').textContent.trim();
+  var arrEl=$('arrIn'), playBtn=$('playBtn'), bpmEl=$('bpm'), clockEl=$('sendClock'), laEl=$('lookahead');
+  var sp={mode:'preview', arrText:BUILTIN, bpm:null, lookahead:100, clock:false};
+  try { var sv=JSON.parse(localStorage.getItem(SONG_KEY)||'null'); if (sv){ for (var sk in sp) if (sv[sk]!==undefined && sv[sk]!==null) sp[sk]=sv[sk]; } } catch(e){}
+  function saveSong(){ try{ localStorage.setItem(SONG_KEY, JSON.stringify(sp)); }catch(e){} }
+  function songMsg(lines){
+    var m=$('songMsg'); m.innerHTML='';
+    lines.forEach(function(l){ var d=document.createElement('div'); d.className=l[0]; d.textContent=l[1]; m.appendChild(d); });
+  }
+  var songEnv={ getOutput:function(){ return out; }, now:function(){ return performance.now(); }, intervalMs:25, lookaheadMs:sp.lookahead,
+    onCC:function(track,param,value){ (st.values[track]=st.values[track]||{})[param]=value; updateSlider(track,param); scheduleSave(); },
+    onEnd:function(natural){ playBtn.textContent='▶ Play'; playBtn.classList.remove('on'); setSongLocked(false); renderTrackButtons();
+      log(natural?'■ song finished (all notes off sent)':'■ stopped: note-offs + CC123 on ch '+(cur&&cur.usedChannels.join(',')),'sys'); lastSec=-1; showPos(); } };
+  var player=new OPZ.SONG.Player(songEnv), cur=null, lastSec=-1, posTimer=null;
+  function setSongLocked(on){ ['loadArrBtn','builtinBtn','sendClock'].forEach(function(id){ $(id).disabled=on; });
+    Array.prototype.forEach.call($('modeSeg').children,function(b){ b.disabled=on; }); }
+  function renderMode(){ Array.prototype.forEach.call($('modeSeg').children,function(b){ b.classList.toggle('on', b.dataset.m===sp.mode); }); }
+  Array.prototype.forEach.call($('modeSeg').children,function(b){ b.onclick=function(){ sp.mode=b.dataset.m; saveSong(); renderMode(); summary(); }; });
+  function compileNow(mode){ return OPZ.SONG.compile(sp.arrText,{mode:mode||sp.mode, channels:st.channels}); }
+  function dur(C,bpm){ return OPZ.SONG.fmtTime(C.totalBeats*60/(bpm||C.bpm)); }
+  function summary(){
+    var S=compileNow('song'), P=compileNow('preview'), bpm=+bpmEl.value||S.bpm;
+    if (!S.ok||!P.ok){ var l=[]; S.errors.concat(P.errors).forEach(function(e){ l.push(['e','✕ '+e]); }); songMsg(l); return false; }
+    var name=''; try{ name=JSON.parse(OPZ.extractJSON(sp.arrText)).name||''; }catch(e){}
+    var l=[['o','✓ '+(name?name+': ':'')+'full song '+S.sections.length+' patterns = '+S.bars+' bars = '+dur(S,bpm)+' · preview '+P.sections.length+' patterns = '+P.bars+' bars = '+dur(P,bpm)+' (at '+bpm+' BPM) · mode: '+(sp.mode==='song'?'full song':'preview')]];
+    S.warnings.forEach(function(w){ l.push(['w','! '+w]); });
+    songMsg(l); return true;
+  }
+  function loadText(text, label){
+    var S=OPZ.SONG.compile(text,{mode:'song',channels:st.channels}), P=OPZ.SONG.compile(text,{mode:'preview',channels:st.channels});
+    if (!S.ok||!P.ok){ var l=[]; S.errors.concat(P.errors).forEach(function(e){ l.push(['e','✕ '+e]); }); l.unshift(['e','✕ Not loaded (the previous arrangement is still active).']); songMsg(l); return false; }
+    sp.arrText=text; sp.bpm=null; bpmEl.value=S.bpm; saveSong(); summary(); log('arrangement '+label,'sys'); return true;
+  }
+  arrEl.value=sp.arrText; bpmEl.value=sp.bpm||compileNow('song').bpm||135; laEl.value=sp.lookahead; clockEl.checked=!!sp.clock; renderMode();
+  if (!summary()){ sp.arrText=BUILTIN; arrEl.value=BUILTIN; summary(); }
+  $('loadArrBtn').onclick=function(){ loadText(arrEl.value,'loaded'); };
+  $('builtinBtn').onclick=function(){ arrEl.value=BUILTIN; loadText(BUILTIN,'restored to built-in'); };
+  $('copyArrBtn').onclick=function(){ var t=arrEl.value; if (navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(function(){ songMsg([['o','✓ Arrangement copied']]); },function(){ arrEl.select(); }); else arrEl.select(); };
+  function onBpm(){ var v=+bpmEl.value; if (!(v>=20&&v<=300)) return; sp.bpm=v; saveSong(); player.setBpm(v); if (!player.playing) summary(); }
+  bpmEl.addEventListener('input',onBpm); bpmEl.addEventListener('change',onBpm);
+  laEl.onchange=function(){ var v=Math.max(0,Math.min(500,+laEl.value||0)); laEl.value=v; sp.lookahead=v; songEnv.lookaheadMs=v; saveSong(); };
+  clockEl.onchange=function(){ sp.clock=clockEl.checked; saveSong(); };
+  var barsEl=$('posBars');
+  function showPos(){
+    if (!player.playing || !cur){ $('posSec').textContent='–'; $('posRep').textContent='stopped'; $('posBar').textContent=''; $('posTime').textContent=''; barsEl.innerHTML=''; return; }
+    var b=player.currentBeat(), s=OPZ.SONG.sectionAt(cur,b), bpb=cur.bpb, bars=s.beats/bpb;
+    var barIn=Math.min(bars, Math.floor((b-s.startBeat)/bpb)+1), gbar=Math.min(cur.bars, Math.floor(b/bpb)+1), beatIn=Math.floor(b%bpb)+1;
+    $('posSec').textContent=s.name; $('posRep').textContent='rep '+s.rep+'/'+s.reps;
+    if (barsEl.children.length!==bars){ barsEl.innerHTML=''; for (var i=0;i<bars;i++) barsEl.appendChild(document.createElement('i')); }
+    Array.prototype.forEach.call(barsEl.children,function(e,i){ e.className=i<barIn?'on':''; });
+    $('posBar').textContent='bar '+barIn+'/'+bars+' · beat '+beatIn+' · song bar '+gbar+'/'+cur.bars;
+    var sec=(b-0)*60/player.bpm, tot=cur.totalBeats*60/player.bpm;   // approximate if BPM changed mid-song
+    $('posTime').textContent=OPZ.SONG.fmtTime(sec)+' / '+OPZ.SONG.fmtTime(tot);
+    var si=cur.sections.indexOf(s); if (si!==lastSec){ lastSec=si; log('▶ '+s.name+' '+s.rep+'/'+s.reps+' (song bar '+gbar+')','sys'); }
+  }
+  playBtn.onclick=function(){
+    if (player.playing){ player.stop(false); return; }
+    var C=compileNow(); if (!C.ok){ summary(); return; }
+    cur=C; lastSec=-1;
+    var bpm=+bpmEl.value; if (!(bpm>=20&&bpm<=300)){ bpm=C.bpm; bpmEl.value=bpm; }
+    if (!out) songMsg([['w','! No MIDI output selected. Playing silently (position only).']]); else summary();
+    log('▶ play '+(sp.mode==='song'?'full song':'preview A–H')+': '+C.bars+' bars, '+C.events.length+' MIDI events, '+bpm+' BPM'+(clockEl.checked?', MIDI clock on':''),'sys');
+    playBtn.textContent='■ Stop'; playBtn.classList.add('on'); setSongLocked(true);
+    player.play(C,{bpm:bpm, clock:clockEl.checked});
+    clearInterval(posTimer); posTimer=setInterval(function(){ showPos(); if (!player.playing){ clearInterval(posTimer); showPos(); } },100);
+    showPos();
+  };
+  $('panicBtn').onclick=function(){
+    if (player.playing) player.stop(false);
+    if (!out){ log('all notes off: no output','sys'); return; }
+    for (var ch=1;ch<=16;ch++){ try{ out.send([0xB0|(ch-1),123,0]); }catch(e){} }
+    log('→ CC123 all-notes-off on ch 1-16','sys');
+  };
+  document.addEventListener('visibilitychange',function(){ if (document.hidden && player.playing) log('! page hidden: timers may be throttled, keep the screen on while playing','sys'); });
 
   renderTrack();
   connect();
